@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Rotação Upseller — Indisponibilidade
-// @namespace    upseller.rotacao
+// @name         upsellerjoao-pixel
+// @namespace    upsellerjoao-pixel
 // @version      5.1.1
 // @description  Controla status no SalesSmartly (online/ocupado/indisponível), registra motivos e tempos no painel da Rotação Upseller.
 // @author       Upseller
