@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Rotação Upseller — Indisponibilidade
 // @namespace    upseller.rotacao
-// @version      5.2.1
+// @version      5.3.0
 // @description  Controla status no SalesSmartly (online/ocupado/indisponível), registra motivos e tempos no painel da Rotação Upseller.
 // @author       Upseller
 // @match        *://*.salesmartly.com/*
@@ -10,6 +10,7 @@
 // @grant        GM_xmlhttpRequest
 // @connect      mqmfddozbqdujcbjbuqm.supabase.co
 // @connect      api.salesmartly.com
+// @connect      raw.githubusercontent.com
 // @updateURL    https://raw.githubusercontent.com/upsellerjoao-pixel/rotacao-up/main/rotacao-upseller.user.js
 // @downloadURL  https://raw.githubusercontent.com/upsellerjoao-pixel/rotacao-up/main/rotacao-upseller.user.js
 // ==/UserScript==
@@ -452,6 +453,40 @@
 
   function esc(s) { return String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
+  // ── Verificar atualização (lê o @version do GitHub e compara com o instalado) ──
+  const UPDATE_URL = 'https://raw.githubusercontent.com/upsellerjoao-pixel/rotacao-up/main/rotacao-upseller.user.js';
+  const VERSAO = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) ? GM_info.script.version : '?';
+  function compararVersao(a, b) {
+    const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+    const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const x = pa[i] || 0, y = pb[i] || 0;
+      if (x > y) return 1; if (x < y) return -1;
+    }
+    return 0;
+  }
+  function verificarAtualizacao(link) {
+    if (!link) return;
+    link.textContent = 'verificando…';
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: UPDATE_URL + '?t=' + Date.now(), // ?t= evita cache do GitHub
+      onload: (r) => {
+        const m = (r.responseText || '').match(/@version\s+([0-9][0-9.]*)/);
+        const remota = m ? m[1] : null;
+        if (!remota) { link.textContent = 'erro ao verificar'; return; }
+        if (compararVersao(remota, VERSAO) > 0) {
+          link.outerHTML = `nova versão ${esc(remota)} — <a id="ups-do-upd">atualizar agora</a>`;
+          const d = panel.querySelector('#ups-do-upd');
+          if (d) d.onclick = () => { try { window.open(UPDATE_URL, '_blank'); } catch (e) { location.href = UPDATE_URL; } };
+        } else {
+          link.textContent = 'já está na última (v' + VERSAO + ')';
+        }
+      },
+      onerror: () => { link.textContent = 'sem conexão'; }
+    });
+  }
+
   function render() {
     if (!usuario) { renderLogin(); return; }
     renderApp();
@@ -574,7 +609,8 @@
         <div style="font-size:10px;color:#5e6f8c;margin-top:6px;line-height:1.4;">Ajuste o WhatsApp no site da Rotação; depois clique aqui.</div>
       </div>` : ''}
       <div class="ups-msg" id="ups-amsg"></div>
-      <div class="ups-foot">${esc(usuario.apelido || usuario.nome)}${ehGestor() ? ' · gestor' : ''} · <a id="ups-sair">sair</a></div>`;
+      <div class="ups-foot">${esc(usuario.apelido || usuario.nome)}${ehGestor() ? ' · gestor' : ''} · <a id="ups-sair">sair</a></div>
+      <div class="ups-foot" style="margin-top:4px;">v${esc(VERSAO)} · <a id="ups-upd">buscar atualização</a></div>`;
 
     panel.querySelector('#ups-sair').onclick = () => { limparSessao(); usuario = null; render(); };
     panel.querySelector('#ups-b-ativo').onclick  = () => aplicarAtivo();
@@ -583,6 +619,7 @@
     panel.querySelector('#ups-cfg').onclick      = () => { telaAtual = 'foto'; renderEditorFoto(); };
     panel.querySelector('#ups-foto-btn').onclick = () => { telaAtual = 'foto'; renderEditorFoto(); };
     const bd = panel.querySelector('#ups-b-distribuir'); if (bd) bd.onclick = () => distribuirGrupos();
+    const bu = panel.querySelector('#ups-upd'); if (bu) bu.onclick = () => verificarAtualizacao(bu);
   }
 
   // Editor da foto/GIF do botão (link ou arquivo). Salva no navegador do colaborador.
@@ -956,5 +993,5 @@
   }
 
 
-  console.log('[Upseller] Userscript v5.2.1 ativo — cockpit, alça de redimensionar no canto inferior esquerdo (sem pulo), fecha ao clicar fora, botão arrastável.');
+  console.log('[Upseller] Userscript v5.3.0 ativo — cockpit, redimensionável, botão "buscar atualização" no painel. Fecha ao clicar fora, arrastável.');
 })();
