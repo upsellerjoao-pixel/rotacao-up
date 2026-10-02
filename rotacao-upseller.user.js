@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Rotação Upseller — Indisponibilidade
 // @namespace    upseller.rotacao
-// @version      5.1.1
+// @version      5.2.0
 // @description  Controla status no SalesSmartly (online/ocupado/indisponível), registra motivos e tempos no painel da Rotação Upseller.
 // @author       Upseller
 // @match        *://*.salesmartly.com/*
@@ -201,11 +201,16 @@
     #ups-fab.off  { border-color:#ef4444; box-shadow:0 0 0 2px #0b0f18, 0 0 16px rgba(239,68,68,.6), 0 8px 20px rgba(0,0,0,.45); }
 
     #ups-panel { position: fixed; bottom: 86px; right: 24px; z-index: 2147483646;
-      width: 288px; max-height: calc(100vh - 28px); overflow-y: auto;
+      width: 288px; min-width: 248px; max-width: 560px;
+      min-height: 180px; max-height: calc(100vh - 28px); overflow: auto; resize: both;
       background:#0e1320; color:#e8edf7; border:1px solid #1f2a3e;
       border-radius:18px; box-shadow:0 18px 50px rgba(0,0,0,.55); padding:16px 16px 14px;
       font-family:'Segoe UI',system-ui,-apple-system,sans-serif; display:none;
       background-image: radial-gradient(130% 70% at 50% -10%, rgba(37,99,235,.14), transparent 60%); }
+    /* alça de redimensionar (canto inferior direito) mais visível no tema escuro */
+    #ups-panel::-webkit-resizer {
+      background:
+        linear-gradient(135deg, transparent 0 48%, #46577a 48% 56%, transparent 56% 66%, #46577a 66% 74%, transparent 74% 84%, #46577a 84% 92%, transparent 92%); }
     #ups-panel.open { display:block; }
 
     .ups-top { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
@@ -312,6 +317,22 @@
       }
     } catch (e) {}
   })();
+
+  // ── Tamanho do painel (cada colaborador redimensiona e fica salvo) ──
+  (function restaurarTamanhoPainel() {
+    try {
+      const s = JSON.parse(localStorage.getItem('upseller_panel_size') || 'null');
+      if (s && s.w) panel.style.width = s.w + 'px';
+      if (s && s.h) panel.style.height = s.h + 'px';
+    } catch (e) {}
+  })();
+  // Salva o tamanho sempre que o usuário termina de arrastar a alça (pointerup com o painel aberto).
+  // Só lê width/height inline — que vêm do resize nativo —, então mudanças de conteúdo não poluem.
+  document.addEventListener('pointerup', () => {
+    if (!panel.classList.contains('open')) return;
+    const w = parseInt(panel.style.width, 10), h = parseInt(panel.style.height, 10);
+    if (w || h) { try { localStorage.setItem('upseller_panel_size', JSON.stringify({ w: w || null, h: h || null })); } catch (e) {} }
+  });
 
   function posicionarPainel() {
     // Ancora o painel ao lado do botão SEM cobri-lo, para o botão continuar clicável.
@@ -885,5 +906,5 @@
   }
 
 
-  console.log('[Upseller] Userscript v5.1.1 ativo — cockpit (foto + luz de status), fecha ao clicar fora, botão sempre clicável. Arrastável.');
+  console.log('[Upseller] Userscript v5.2.0 ativo — cockpit (foto + luz de status), fecha ao clicar fora, botão arrastável, painel redimensionável.');
 })();
