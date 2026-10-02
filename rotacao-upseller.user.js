@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Rotação Upseller — Indisponibilidade
 // @namespace    upseller.rotacao
-// @version      5.2.0
+// @version      5.2.1
 // @description  Controla status no SalesSmartly (online/ocupado/indisponível), registra motivos e tempos no painel da Rotação Upseller.
 // @author       Upseller
 // @match        *://*.salesmartly.com/*
@@ -202,15 +202,17 @@
 
     #ups-panel { position: fixed; bottom: 86px; right: 24px; z-index: 2147483646;
       width: 288px; min-width: 248px; max-width: 560px;
-      min-height: 180px; max-height: calc(100vh - 28px); overflow: auto; resize: both;
+      min-height: 180px; max-height: calc(100vh - 28px); overflow: auto;
       background:#0e1320; color:#e8edf7; border:1px solid #1f2a3e;
       border-radius:18px; box-shadow:0 18px 50px rgba(0,0,0,.55); padding:16px 16px 14px;
       font-family:'Segoe UI',system-ui,-apple-system,sans-serif; display:none;
       background-image: radial-gradient(130% 70% at 50% -10%, rgba(37,99,235,.14), transparent 60%); }
-    /* alça de redimensionar (canto inferior direito) mais visível no tema escuro */
-    #ups-panel::-webkit-resizer {
+    /* alça de redimensionar — canto inferior ESQUERDO, voltada para a área livre */
+    #ups-resize { position: fixed; z-index: 2147483647; width: 22px; height: 22px; display: none;
+      cursor: nesw-resize; border-radius: 0 0 0 10px; touch-action: none;
       background:
-        linear-gradient(135deg, transparent 0 48%, #46577a 48% 56%, transparent 56% 66%, #46577a 66% 74%, transparent 74% 84%, #46577a 84% 92%, transparent 92%); }
+        linear-gradient(45deg, transparent 0 44%, #5a6c8f 44% 52%, transparent 52% 63%, #5a6c8f 63% 71%, transparent 71% 82%, #5a6c8f 82% 90%, transparent 90%); }
+    #ups-resize:hover { filter: brightness(1.45); }
     #ups-panel.open { display:block; }
 
     .ups-top { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
@@ -304,6 +306,18 @@
   panel.id = 'ups-panel';
   document.body.appendChild(panel);
 
+  // Alça de redimensionar (elemento separado, no canto inferior esquerdo do painel)
+  const grip = document.createElement('div');
+  grip.id = 'ups-resize';
+  grip.title = 'Arraste para redimensionar';
+  document.body.appendChild(grip);
+  function posicionarGrip() {
+    const r = panel.getBoundingClientRect();
+    grip.style.left = (r.left - 4) + 'px';
+    grip.style.top  = (r.bottom - 18) + 'px';
+  }
+  function mostrarGrip(v) { grip.style.display = v ? 'block' : 'none'; if (v) posicionarGrip(); }
+
   // ── Posição salva do botão (arrastável) ──
   (function restaurarPosFab() {
     try {
@@ -326,18 +340,52 @@
       if (s && s.h) panel.style.height = s.h + 'px';
     } catch (e) {}
   })();
-  // Salva o tamanho sempre que o usuário termina de arrastar a alça (pointerup com o painel aberto).
-  // Só lê width/height inline — que vêm do resize nativo —, então mudanças de conteúdo não poluem.
-  document.addEventListener('pointerup', () => {
-    if (!panel.classList.contains('open')) return;
-    const w = parseInt(panel.style.width, 10), h = parseInt(panel.style.height, 10);
-    if (w || h) { try { localStorage.setItem('upseller_panel_size', JSON.stringify({ w: w || null, h: h || null })); } catch (e) {} }
+  // Redimensionar arrastando a alça: ancora o canto SUPERIOR DIREITO e cresce para
+  // a esquerda/baixo (área livre). Acompanha o cursor sem "pular".
+  let _rz = false, _fixTop = 0, _fixRight = 0;
+  grip.addEventListener('pointerdown', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const r = panel.getBoundingClientRect();
+    _fixTop = r.top; _fixRight = r.right;
+    // fixa o canto superior-direito para o redimensionamento ser estável
+    panel.style.top = r.top + 'px';
+    panel.style.right = (window.innerWidth - r.right) + 'px';
+    panel.style.left = 'auto';
+    panel.style.bottom = 'auto';
+    _rz = true;
+    try { grip.setPointerCapture(e.pointerId); } catch (e2) {}
   });
+  grip.addEventListener('pointermove', (e) => {
+    if (!_rz) return;
+    let w = _fixRight - e.clientX;
+    let h = e.clientY - _fixTop;
+    w = Math.max(248, Math.min(w, _fixRight - 8, 560));
+    h = Math.max(180, Math.min(h, window.innerHeight - 8 - _fixTop));
+    panel.style.width = w + 'px';
+    panel.style.height = h + 'px';
+    posicionarGrip();
+  });
+  grip.addEventListener('pointerup', () => {
+    if (!_rz) return;
+    _rz = false;
+    try {
+      localStorage.setItem('upseller_panel_size', JSON.stringify({
+        w: parseInt(panel.style.width, 10) || null,
+        h: parseInt(panel.style.height, 10) || null
+      }));
+    } catch (e) {}
+  });
+  // Mantém a alça colada no canto mesmo quando o conteúdo do painel muda (carregamento
+  // assíncrono, troca de tela) ou a janela é redimensionada.
+  try { new ResizeObserver(() => { if (panel.classList.contains('open')) posicionarGrip(); }).observe(panel); } catch (e) {}
+  window.addEventListener('resize', () => { if (panel.classList.contains('open')) { posicionarGrip(); } });
 
   function posicionarPainel() {
     // Ancora o painel ao lado do botão SEM cobri-lo, para o botão continuar clicável.
     const r = fab.getBoundingClientRect();
-    const margem = 10, pw = 288;
+    const margem = 10;
+    // usa a largura real escolhida pelo colaborador (ou 288 no padrão)
+    const pw = parseInt(panel.style.width, 10) || 288;
     // horizontal: centraliza no botão, mas sem sair da tela
     let left = Math.min(Math.max(8, r.left + r.width / 2 - pw / 2), window.innerWidth - pw - 8);
     panel.style.left = left + 'px';
@@ -385,19 +433,21 @@
       // foi um clique → abre/fecha o painel
       posicionarPainel();
       panel.classList.toggle('open');
-      if (panel.classList.contains('open')) render();
+      const aberto = panel.classList.contains('open');
+      if (aberto) render();
+      mostrarGrip(aberto);
     }
   });
 
   // Fecha (minimiza) o painel ao clicar fora dele e fora do botão.
   document.addEventListener('pointerdown', (e) => {
     if (!panel.classList.contains('open')) return;
-    if (panel.contains(e.target) || fab.contains(e.target)) return;
-    panel.classList.remove('open');
+    if (panel.contains(e.target) || fab.contains(e.target) || grip.contains(e.target)) return;
+    panel.classList.remove('open'); mostrarGrip(false);
   }, true);
   // Esc também fecha
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && panel.classList.contains('open')) panel.classList.remove('open');
+    if (e.key === 'Escape' && panel.classList.contains('open')) { panel.classList.remove('open'); mostrarGrip(false); }
   });
 
   function esc(s) { return String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
@@ -906,5 +956,5 @@
   }
 
 
-  console.log('[Upseller] Userscript v5.2.0 ativo — cockpit (foto + luz de status), fecha ao clicar fora, botão arrastável, painel redimensionável.');
+  console.log('[Upseller] Userscript v5.2.1 ativo — cockpit, alça de redimensionar no canto inferior esquerdo (sem pulo), fecha ao clicar fora, botão arrastável.');
 })();
