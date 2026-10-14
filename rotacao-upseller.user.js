@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Rotação Upseller — Indisponibilidade
 // @namespace    upseller.rotacao
-// @version      5.4.0
+// @version      5.4.1
 // @description  Controla status no SalesSmartly (online/ocupado/indisponível), registra motivos e tempos no painel da Rotação Upseller.
 // @author       Upseller
 // @match        *://*.salesmartly.com/*
@@ -194,21 +194,48 @@
   // ── Som do alerta (liga/desliga, salvo no navegador) ──
   function somAlertaLigado() { try { return localStorage.getItem('upseller_som_alerta') !== '0'; } catch (e) { return true; } }
   function setSomAlerta(v) { try { localStorage.setItem('upseller_som_alerta', v ? '1' : '0'); } catch (e) {} }
-  function tocarChime() {
+  // Um ÚNICO AudioContext, destravado no primeiro clique/tecla. Os navegadores
+  // bloqueiam áudio sem um gesto do usuário — por isso destravamos cedo e
+  // reusamos o mesmo contexto (criar um novo na hora do alerta fica mudo).
+  let _ac = null;
+  function desbloquearAudio() {
+    try {
+      if (!_ac) _ac = new (window.AudioContext || window.webkitAudioContext)();
+      if (_ac.state === 'suspended') _ac.resume();
+    } catch (e) {}
+    try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch (e) {}
+  }
+  function tocarChime(forte) {
     if (!somAlertaLigado()) return;
     try {
-      const ac = new (window.AudioContext || window.webkitAudioContext)();
-      const notas = [880, 1175]; // duas notas curtas, discreto
+      if (!_ac) _ac = new (window.AudioContext || window.webkitAudioContext)();
+      if (_ac.state === 'suspended') _ac.resume();
+      const ac = _ac;
+      // 'square' corta melhor que 'sine' para alerta; mais notas e volume quando forte.
+      const notas = forte ? [988, 1319, 988, 1319, 988] : [880, 1175, 880];
+      const vol = forte ? 0.34 : 0.24;
       notas.forEach((f, i) => {
         const o = ac.createOscillator(), g = ac.createGain();
-        o.type = 'sine'; o.frequency.value = f; o.connect(g); g.connect(ac.destination);
-        const t0 = ac.currentTime + i * 0.18;
+        o.type = 'square'; o.frequency.value = f; o.connect(g); g.connect(ac.destination);
+        const t0 = ac.currentTime + i * 0.22;
         g.gain.setValueAtTime(0.0001, t0);
-        g.gain.exponentialRampToValueAtTime(0.14, t0 + 0.02);
-        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.22);
-        o.start(t0); o.stop(t0 + 0.26);
+        g.gain.exponentialRampToValueAtTime(vol, t0 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.2);
+        o.start(t0); o.stop(t0 + 0.24);
       });
-      setTimeout(() => { try { ac.close(); } catch (e) {} }, 800);
+    } catch (e) {}
+  }
+  // Notificação do sistema — aparece mesmo com a aba do SalesSmartly em segundo
+  // plano (que é o caso: o colaborador está dentro do AnyDesk).
+  function notificar(titulo, corpo) {
+    try {
+      if (!('Notification' in window)) return;
+      if (Notification.permission === 'granted') {
+        const n = new Notification(titulo, { body: corpo || '', tag: 'ups-anydesk', renotify: true, requireInteraction: true });
+        n.onclick = () => { try { window.focus(); n.close(); } catch (e) {} };
+      } else if (Notification.permission === 'default') {
+        Notification.requestPermission();
+      }
     } catch (e) {}
   }
 
@@ -230,30 +257,42 @@
   }
 
   // ── Monitor do AnyDesk (alerta em camadas) ──
-  let _anydeskInicio = null, _anydeskTimer = null, _anydeskAvisou = false, _anydeskEscalou = false, _anydeskId = '';
+  let _anydeskInicio = null, _anydeskTimer = null, _anydeskAvisou = false, _anydeskEscalou = false, _anydeskId = '', _ultimoChime = 0;
   function pararMonitorAnydesk() {
     if (_anydeskTimer) { clearInterval(_anydeskTimer); _anydeskTimer = null; }
-    _anydeskInicio = null; _anydeskAvisou = false; _anydeskEscalou = false; _anydeskId = '';
+    _anydeskInicio = null; _anydeskAvisou = false; _anydeskEscalou = false; _anydeskId = ''; _ultimoChime = 0;
     if (_fabAlerta) { _fabAlerta = false; aplicarFab(); }
   }
   function iniciarMonitorAnydesk(inicioISO, idAtend) {
     pararMonitorAnydesk();
     _anydeskInicio = inicioISO ? new Date(inicioISO).getTime() : Date.now();
     _anydeskId = idAtend || '';
-    _anydeskTimer = setInterval(checarAnydesk, 20000);
+    _anydeskTimer = setInterval(checarAnydesk, 15000);
     checarAnydesk();
   }
   function checarAnydesk() {
     if (!_anydeskInicio) return;
     const min = (Date.now() - _anydeskInicio) / 60000;
     const ref = _anydeskId ? ` (atendimento ${esc(_anydeskId)})` : '';
+    const refTxt = _anydeskId ? `Atendimento ${_anydeskId}. ` : '';
     if (min >= ANYDESK_ALERTA_MIN && !_anydeskAvisou) {
-      _anydeskAvisou = true; _fabAlerta = true; aplicarFab(); tocarChime();
+      _anydeskAvisou = true; _fabAlerta = true; aplicarFab();
+      tocarChime(false);
+      notificar(`⏱️ AnyDesk passou de ${ANYDESK_ALERTA_MIN} min`, `${refTxt}Conseguiu resolver? Se não, escale o caso.`);
       toastExt(`⏱️ AnyDesk já passou de ${ANYDESK_ALERTA_MIN} min${ref}. Conseguiu resolver? Se não, <b>escale o caso</b>.`, 'alerta', 0);
+      _ultimoChime = Date.now();
     }
     if (min >= ANYDESK_ESCALA_MIN && !_anydeskEscalou) {
-      _anydeskEscalou = true; tocarChime();
+      _anydeskEscalou = true;
+      tocarChime(true);
+      notificar(`🚨 AnyDesk passou de ${ANYDESK_ESCALA_MIN} min`, `${refTxt}O gestor já é avisado no painel. Escale agora se ainda não resolveu.`);
       toastExt(`🚨 AnyDesk passou de ${ANYDESK_ESCALA_MIN} min${ref} — o gestor já é avisado no painel. <b>Escale agora</b> se ainda não resolveu.`, 'alerta', 0);
+      _ultimoChime = Date.now();
+    }
+    // Lembrete: enquanto estiver acima do limite e não resolveu, re-bipa a cada 60s.
+    if (_anydeskAvisou && (Date.now() - _ultimoChime) >= 60000) {
+      tocarChime(min >= ANYDESK_ESCALA_MIN);
+      _ultimoChime = Date.now();
     }
   }
 
@@ -412,6 +451,15 @@
     } catch (e) {}
   }
   sincronizarEstadoInicial();
+
+  // Destrava o áudio e pede permissão de notificação no primeiro gesto do usuário
+  // (navegadores exigem um gesto antes de tocar som / mostrar notificação).
+  (function armarAudio() {
+    const once = { once: true, capture: true };
+    const h = () => { desbloquearAudio(); };
+    document.addEventListener('pointerdown', h, once);
+    document.addEventListener('keydown', h, once);
+  })();
 
   const panel = document.createElement('div');
   panel.id = 'ups-panel';
@@ -1129,8 +1177,8 @@
     // Registra o período na linha do tempo (ocupado ou indisponível)
     await registrarStatus(ehPausa ? 'ocupado' : 'indisponivel', motivoSel, texto || null);
 
-    // AnyDesk: liga o monitor de tempo (alerta em camadas)
-    if (motivoSel === 'anydesk') iniciarMonitorAnydesk(new Date().toISOString(), anydeskId);
+    // AnyDesk: destrava o áudio (estamos num clique) e liga o monitor de tempo
+    if (motivoSel === 'anydesk') { desbloquearAudio(); iniciarMonitorAnydesk(new Date().toISOString(), anydeskId); }
 
     // SalesSmartly: PAUSA -> Ocupado; INDISPONÍVEL -> Desconectado
     const alvo = ehPausa ? 'Ocupado' : 'Desconectado';
@@ -1146,5 +1194,5 @@
   }
 
 
-  console.log('[Upseller] Userscript v5.4.0 ativo — sincroniza cor ao carregar, Ocupação de grupos, AnyDesk com ID + alerta de tempo.');
+  console.log('[Upseller] Userscript v5.4.1 ativo — alerta AnyDesk com som destravável, bip repetido e notificação do sistema.');
 })();
