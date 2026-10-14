@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Rotação Upseller — Indisponibilidade
 // @namespace    upseller.rotacao
-// @version      5.3.0
+// @version      5.4.0
 // @description  Controla status no SalesSmartly (online/ocupado/indisponível), registra motivos e tempos no painel da Rotação Upseller.
 // @author       Upseller
 // @match        *://*.salesmartly.com/*
@@ -47,6 +47,10 @@
 
   // online_status: 1 = Conectado, 2 = Ocupado, 0 = Desconectado (confirmado no DevTools)
   const VALOR = { Conectado: 1, Ocupado: 2, Desconectado: 0 };
+
+  // AnyDesk — limites de tempo (minutos). Ajuste aqui se precisar.
+  const ANYDESK_ALERTA_MIN = 10;  // aviso ao colaborador (FAB pulsa + chime)
+  const ANYDESK_ESCALA_MIN = 15;  // a partir daqui o painel avisa o gestor
 
   // Só roda no topo (evita rodar dentro de iframes irrelevantes), mas se o
   // chat estiver num iframe, ele também tem window.top !== window — então
@@ -168,11 +172,13 @@
 
   // Estilo visual por estado: cor do anel/brilho e classe do FAB
   const ESTILO_ESTADO = {
-    ativo:   { ring:'#22c55e', glow:'rgba(34,197,94,.75)',  fab:'',     label:'Online',       sub:'Conectado e atendendo' },
-    pausado: { ring:'#f59e0b', glow:'rgba(245,158,11,.75)', fab:'busy', label:'Ocupado',      sub:'Presente, fora da fila' },
-    indisp:  { ring:'#ef4444', glow:'rgba(239,68,68,.7)',   fab:'off',  label:'Indisponível', sub:'Fora do ambiente' }
+    ativo:   { ring:'#22c55e', glow:'rgba(34,197,94,.75)',  fab:'',       label:'Online',       sub:'Conectado e atendendo' },
+    pausado: { ring:'#f59e0b', glow:'rgba(245,158,11,.75)', fab:'busy',   label:'Ocupado',      sub:'Presente, fora da fila' },
+    grupos:  { ring:'#38bdf8', glow:'rgba(56,189,248,.75)', fab:'grupos', label:'Em grupos',    sub:'Trabalhando nos grupos — fora da fila' },
+    indisp:  { ring:'#ef4444', glow:'rgba(239,68,68,.7)',   fab:'off',    label:'Indisponível', sub:'Fora do ambiente' }
   };
   let estadoAtualFab = 'ativo';
+  let _fabAlerta = false; // pisca vermelho quando o AnyDesk estoura o tempo
 
   // Aplica a foto (ou inicial) e a cor de status no botão flutuante
   function aplicarFab() {
@@ -180,7 +186,75 @@
     const foto = getFoto();
     if (foto) { fab.style.backgroundImage = `url("${foto}")`; fab.textContent = ''; }
     else { fab.style.backgroundImage = 'none'; fab.textContent = inicialUsuario(); }
-    fab.className = (ESTILO_ESTADO[estadoAtualFab] || ESTILO_ESTADO.ativo).fab;
+    let cls = (ESTILO_ESTADO[estadoAtualFab] || ESTILO_ESTADO.ativo).fab;
+    if (_fabAlerta) cls += ' alerta';
+    fab.className = cls.trim();
+  }
+
+  // ── Som do alerta (liga/desliga, salvo no navegador) ──
+  function somAlertaLigado() { try { return localStorage.getItem('upseller_som_alerta') !== '0'; } catch (e) { return true; } }
+  function setSomAlerta(v) { try { localStorage.setItem('upseller_som_alerta', v ? '1' : '0'); } catch (e) {} }
+  function tocarChime() {
+    if (!somAlertaLigado()) return;
+    try {
+      const ac = new (window.AudioContext || window.webkitAudioContext)();
+      const notas = [880, 1175]; // duas notas curtas, discreto
+      notas.forEach((f, i) => {
+        const o = ac.createOscillator(), g = ac.createGain();
+        o.type = 'sine'; o.frequency.value = f; o.connect(g); g.connect(ac.destination);
+        const t0 = ac.currentTime + i * 0.18;
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(0.14, t0 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.22);
+        o.start(t0); o.stop(t0 + 0.26);
+      });
+      setTimeout(() => { try { ac.close(); } catch (e) {} }, 800);
+    } catch (e) {}
+  }
+
+  // ── Toast de aviso da extensão ──
+  let _toastEl = null, _toastTimer = null;
+  function toastExt(msg, tipo, duracaoMs) {
+    try {
+      if (!_toastEl) {
+        _toastEl = document.createElement('div');
+        _toastEl.id = 'ups-toast';
+        document.body.appendChild(_toastEl);
+      }
+      _toastEl.className = (tipo === 'alerta' ? 'alerta ' : '') + 'show';
+      _toastEl.innerHTML = `<span class="ups-toast-x">✕</span>${msg}`;
+      _toastEl.querySelector('.ups-toast-x').onclick = () => { _toastEl.classList.remove('show'); };
+      if (_toastTimer) clearTimeout(_toastTimer);
+      if (duracaoMs !== 0) _toastTimer = setTimeout(() => { _toastEl && _toastEl.classList.remove('show'); }, duracaoMs || 12000);
+    } catch (e) {}
+  }
+
+  // ── Monitor do AnyDesk (alerta em camadas) ──
+  let _anydeskInicio = null, _anydeskTimer = null, _anydeskAvisou = false, _anydeskEscalou = false, _anydeskId = '';
+  function pararMonitorAnydesk() {
+    if (_anydeskTimer) { clearInterval(_anydeskTimer); _anydeskTimer = null; }
+    _anydeskInicio = null; _anydeskAvisou = false; _anydeskEscalou = false; _anydeskId = '';
+    if (_fabAlerta) { _fabAlerta = false; aplicarFab(); }
+  }
+  function iniciarMonitorAnydesk(inicioISO, idAtend) {
+    pararMonitorAnydesk();
+    _anydeskInicio = inicioISO ? new Date(inicioISO).getTime() : Date.now();
+    _anydeskId = idAtend || '';
+    _anydeskTimer = setInterval(checarAnydesk, 20000);
+    checarAnydesk();
+  }
+  function checarAnydesk() {
+    if (!_anydeskInicio) return;
+    const min = (Date.now() - _anydeskInicio) / 60000;
+    const ref = _anydeskId ? ` (atendimento ${esc(_anydeskId)})` : '';
+    if (min >= ANYDESK_ALERTA_MIN && !_anydeskAvisou) {
+      _anydeskAvisou = true; _fabAlerta = true; aplicarFab(); tocarChime();
+      toastExt(`⏱️ AnyDesk já passou de ${ANYDESK_ALERTA_MIN} min${ref}. Conseguiu resolver? Se não, <b>escale o caso</b>.`, 'alerta', 0);
+    }
+    if (min >= ANYDESK_ESCALA_MIN && !_anydeskEscalou) {
+      _anydeskEscalou = true; tocarChime();
+      toastExt(`🚨 AnyDesk passou de ${ANYDESK_ESCALA_MIN} min${ref} — o gestor já é avisado no painel. <b>Escale agora</b> se ainda não resolveu.`, 'alerta', 0);
+    }
   }
 
   let usuario = getSessao();
@@ -200,6 +274,22 @@
     #ups-fab:hover { transform: scale(1.07); }
     #ups-fab.busy { border-color:#f59e0b; box-shadow:0 0 0 2px #0b0f18, 0 0 16px rgba(245,158,11,.65), 0 8px 20px rgba(0,0,0,.45); }
     #ups-fab.off  { border-color:#ef4444; box-shadow:0 0 0 2px #0b0f18, 0 0 16px rgba(239,68,68,.6), 0 8px 20px rgba(0,0,0,.45); }
+    #ups-fab.grupos { border-color:#38bdf8; box-shadow:0 0 0 2px #0b0f18, 0 0 16px rgba(56,189,248,.65), 0 8px 20px rgba(0,0,0,.45); }
+    #ups-fab.alerta { animation: upsFabAlerta .8s ease-in-out infinite; border-color:#ef4444 !important; }
+    @keyframes upsFabAlerta {
+      0%,100% { box-shadow:0 0 0 2px #0b0f18, 0 0 14px rgba(239,68,68,.6), 0 8px 20px rgba(0,0,0,.45); }
+      50%     { box-shadow:0 0 0 3px #ef4444, 0 0 30px rgba(239,68,68,.95), 0 8px 20px rgba(0,0,0,.45); }
+    }
+    /* Toast de aviso da extensão */
+    #ups-toast { position: fixed; z-index: 2147483647; left: 50%; bottom: 96px; transform: translateX(-50%);
+      max-width: 420px; background:#17120c; color:#ffe4c7; border:1px solid #f59e0b;
+      border-radius: 12px; padding: 12px 16px; font-size: 13px; line-height:1.4; font-family: inherit;
+      box-shadow: 0 12px 40px rgba(0,0,0,.5); display:none; }
+    #ups-toast.alerta { background:#1e0d0d; color:#fecaca; border-color:#ef4444; }
+    #ups-toast.show { display:block; animation: upsToastIn .25s ease; }
+    @keyframes upsToastIn { from { opacity:0; transform:translateX(-50%) translateY(10px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
+    #ups-toast .ups-toast-x { float:right; margin-left:12px; cursor:pointer; color:inherit; opacity:.7; }
+    #ups-toast .ups-toast-x:hover { opacity:1; }
 
     #ups-panel { position: fixed; bottom: 86px; right: 24px; z-index: 2147483646;
       width: 288px; min-width: 248px; max-width: 560px;
@@ -302,6 +392,26 @@
   fab.id = 'ups-fab'; fab.title = 'Rotação Upseller — arraste para mover, clique para abrir';
   document.body.appendChild(fab);
   aplicarFab();
+
+  // Ao carregar a página, pinta a cor do status pelo que está REALMENTE aberto no
+  // banco (sem precisar abrir o painel) e, se for AnyDesk, liga o monitor de tempo.
+  async function sincronizarEstadoInicial() {
+    if (!usuario) return;
+    try {
+      const open = await sbReq('GET', `historico_status?colaborador_id=eq.${usuario.id}&fim=is.null&select=status,motivo,motivo_texto,inicio&order=inicio.desc&limit=1`, null, true);
+      if (open.ok && open.json && open.json[0]) {
+        const r = open.json[0];
+        estadoAtualFab = r.status === 'online'
+          ? (r.motivo === 'grupos' ? 'grupos' : 'ativo')
+          : (r.status === 'ocupado' ? 'pausado' : 'indisp');
+        aplicarFab();
+        if (r.status === 'ocupado' && r.motivo === 'anydesk') {
+          iniciarMonitorAnydesk(r.inicio, (r.motivo_texto || '').replace(/^Atendimento\s*/i, ''));
+        }
+      }
+    } catch (e) {}
+  }
+  sincronizarEstadoInicial();
 
   const panel = document.createElement('div');
   panel.id = 'ups-panel';
@@ -552,10 +662,10 @@
     // Estado atual: prioriza o registro aberto em historico_status (dá o "desde quando")
     let estado = 'ativo', inicioStatus = null;
     try {
-      const open = await sbReq('GET', `historico_status?colaborador_id=eq.${usuario.id}&fim=is.null&select=status,inicio&order=inicio.desc&limit=1`, null, true);
+      const open = await sbReq('GET', `historico_status?colaborador_id=eq.${usuario.id}&fim=is.null&select=status,motivo,inicio&order=inicio.desc&limit=1`, null, true);
       if (open.ok && open.json && open.json[0]) {
-        const st = open.json[0].status;
-        estado = st === 'online' ? 'ativo' : (st === 'ocupado' ? 'pausado' : 'indisp');
+        const st = open.json[0].status, mo = open.json[0].motivo;
+        estado = st === 'online' ? (mo === 'grupos' ? 'grupos' : 'ativo') : (st === 'ocupado' ? 'pausado' : 'indisp');
         inicioStatus = open.json[0].inicio;
       } else {
         const disp = await statusPainel();
@@ -598,6 +708,8 @@
           <span class="a-ico">🟢</span><span><div>Conectar</div><div class="a-sub">${estado==='ativo'?'você já está online':'ficar online e na fila'}</div></span></button>
         <button class="ups-act ${estado==='pausado'?'atual':''}" style="--bar:#f59e0b" id="ups-b-pausa">
           <span class="a-ico">🟡</span><span><div>${estado==='pausado'?'Trocar motivo':'Pausar'}</div><div class="a-sub">ocupado, mantém os grupos</div></span></button>
+        <button class="ups-act ${estado==='grupos'?'atual':''}" style="--bar:#38bdf8" id="ups-b-grupos">
+          <span class="a-ico">👥</span><span><div>${estado==='grupos'?'Você está em grupos':'Ocupação de grupos'}</div><div class="a-sub">conta como online, mas sai da fila</div></span></button>
         <button class="ups-act ${estado==='indisp'?'atual':''}" style="--bar:#ef4444" id="ups-b-indisp">
           <span class="a-ico">🔴</span><span><div>${estado==='indisp'?'Trocar motivo':'Ficar indisponível'}</div><div class="a-sub">sai da fila, gestor reajusta</div></span></button>
       </div>
@@ -615,6 +727,7 @@
     panel.querySelector('#ups-sair').onclick = () => { limparSessao(); usuario = null; render(); };
     panel.querySelector('#ups-b-ativo').onclick  = () => aplicarAtivo();
     panel.querySelector('#ups-b-pausa').onclick  = () => { telaAtual = 'pausa'; renderMotivos('pausa'); };
+    panel.querySelector('#ups-b-grupos').onclick = () => aplicarGrupos();
     panel.querySelector('#ups-b-indisp').onclick = () => { telaAtual = 'indisp'; renderMotivos('indisp'); };
     panel.querySelector('#ups-cfg').onclick      = () => { telaAtual = 'foto'; renderEditorFoto(); };
     panel.querySelector('#ups-foto-btn').onclick = () => { telaAtual = 'foto'; renderEditorFoto(); };
@@ -684,6 +797,10 @@
         <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">Especifique:</div>
         <select id="ups-sub" style="width:100%;box-sizing:border-box;background:#111827;border:1px solid #1f2d45;border-radius:8px;padding:9px 12px;color:#f1f5f9;font-size:13px;outline:none;"></select>
       </div>
+      <div id="ups-anydesk-wrap" style="display:none;margin-top:8px;">
+        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;">ID do atendimento (obrigatório)</div>
+        <input id="ups-anydesk-id" placeholder="Ex.: 48213" autocomplete="off">
+      </div>
       <input id="ups-outro" placeholder="Descreva o motivo..." style="margin-top:8px;">
       <button class="ups-btn ${ehPausa?'amber':'red'}" id="ups-confirmar" disabled>${ehPausa?'Pausar':'Ficar indisponível'}</button>
       <button class="ups-btn ghost" id="ups-voltar-home">‹ Voltar</button>
@@ -693,7 +810,10 @@
     const btnC = panel.querySelector('#ups-confirmar');
     const subWrap = panel.querySelector('#ups-sub-wrap');
     const subEl = panel.querySelector('#ups-sub');
+    const adWrap = panel.querySelector('#ups-anydesk-wrap');
+    const adId = panel.querySelector('#ups-anydesk-id');
     outro.style.display = 'none';
+    adId.oninput = () => { if (motivoSel === 'anydesk') btnC.disabled = !adId.value.trim(); };
     panel.querySelectorAll('.ups-motivo').forEach(el => {
       el.onclick = () => {
         panel.querySelectorAll('.ups-motivo').forEach(x => x.classList.remove('sel'));
@@ -709,9 +829,12 @@
         } else {
           subWrap.style.display = 'none';
         }
+        // AnyDesk: pede o ID do atendimento (obrigatório)
+        adWrap.style.display = motivoSel === 'anydesk' ? 'block' : 'none';
         // Campo de texto livre para "Outro"
         outro.style.display = motivoSel === 'outro' ? 'block' : 'none';
-        if (motivoSel === 'outro') { outro.focus(); btnC.disabled = false; }
+        if (motivoSel === 'anydesk') { adId.value = ''; adId.focus(); btnC.disabled = true; }
+        else if (motivoSel === 'outro') { outro.focus(); btnC.disabled = false; }
         else if (!m || !m.sub) { btnC.disabled = false; }
       };
     });
@@ -942,6 +1065,7 @@
 
   // ── 🟢 ATIVO ──
   async function aplicarAtivo() {
+    pararMonitorAnydesk();
     const msg = panel.querySelector('#ups-amsg'); if (msg) msg.className = 'ups-msg';
     const btn = panel.querySelector('#ups-b-ativo'); if (btn) { btn.disabled = true; btn.textContent = 'Aplicando...'; }
     // painel: disponível
@@ -957,12 +1081,38 @@
     setTimeout(() => location.reload(), 1400);
   }
 
+  // ── 👥 OCUPAÇÃO DE GRUPOS ──
+  // Conta como ONLINE no painel (tempo trabalhando), mas fica OCUPADO no SalesSmartly
+  // para NÃO entrar na fila (senão caem atendimentos novos enquanto segura os grupos).
+  async function aplicarGrupos() {
+    pararMonitorAnydesk();
+    const msg = panel.querySelector('#ups-amsg'); if (msg) msg.className = 'ups-msg';
+    const btn = panel.querySelector('#ups-b-grupos'); if (btn) { btn.disabled = true; btn.textContent = 'Aplicando...'; }
+    // painel: continua disponível (não sai da rotação)
+    const r1 = await sbReq('PATCH', `colaboradores?id=eq.${usuario.id}`, { disponivel_hoje: true }, true);
+    // linha do tempo: ONLINE com motivo 'grupos' (conta como trabalhando)
+    await registrarStatus('online', 'grupos', null);
+    // SalesSmartly: Ocupado → sai da fila, não recebe atendimento novo
+    const rs = await mudarStatusSales('Ocupado');
+    if (rs.ok) setStatusSalesLocal('Ocupado');
+    if (!r1.ok) { if (msg) { msg.className = 'ups-msg err'; msg.textContent = 'Erro ao atualizar o painel.'; } return; }
+    if (msg) { msg.className = 'ups-msg ok'; msg.textContent = (rs.ok ? '✅ Em grupos! Conta como online, mas você saiu da fila do SalesSmartly.' : '✅ Registrado no painel. ⚠️ SalesSmartly: ' + rs.motivo) + ' Atualizando página...'; }
+    setTimeout(() => location.reload(), 1400);
+  }
+
   // ── 🟡 PAUSA (Ocupado) ou 🔴 INDISPONÍVEL ──
   async function aplicarAusencia(tipo) {
+    pararMonitorAnydesk();
     const ehPausa = tipo === 'pausa';
     const msg = panel.querySelector('#ups-amsg'); msg.className = 'ups-msg';
     let texto = '';
-    if (motivoSel === 'outro') {
+    let anydeskId = '';
+    if (motivoSel === 'anydesk') {
+      const campo = panel.querySelector('#ups-anydesk-id');
+      anydeskId = campo ? campo.value.trim() : '';
+      if (!anydeskId) { msg.className = 'ups-msg err'; msg.textContent = 'Informe o ID do atendimento para iniciar o AnyDesk.'; if (campo) campo.focus(); return; }
+      texto = 'Atendimento ' + anydeskId;
+    } else if (motivoSel === 'outro') {
       texto = panel.querySelector('#ups-outro').value.trim();
       if (!texto) { msg.className = 'ups-msg err'; msg.textContent = 'Descreva o motivo.'; return; }
     } else if (subSel) {
@@ -979,6 +1129,9 @@
     // Registra o período na linha do tempo (ocupado ou indisponível)
     await registrarStatus(ehPausa ? 'ocupado' : 'indisponivel', motivoSel, texto || null);
 
+    // AnyDesk: liga o monitor de tempo (alerta em camadas)
+    if (motivoSel === 'anydesk') iniciarMonitorAnydesk(new Date().toISOString(), anydeskId);
+
     // SalesSmartly: PAUSA -> Ocupado; INDISPONÍVEL -> Desconectado
     const alvo = ehPausa ? 'Ocupado' : 'Desconectado';
     const rs = await mudarStatusSales(alvo);
@@ -993,5 +1146,5 @@
   }
 
 
-  console.log('[Upseller] Userscript v5.3.0 ativo — cockpit, redimensionável, botão "buscar atualização" no painel. Fecha ao clicar fora, arrastável.');
+  console.log('[Upseller] Userscript v5.4.0 ativo — sincroniza cor ao carregar, Ocupação de grupos, AnyDesk com ID + alerta de tempo.');
 })();
