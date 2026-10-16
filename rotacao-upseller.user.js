@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Rotação Upseller — Indisponibilidade
 // @namespace    upseller.rotacao
-// @version      5.4.1
+// @version      5.4.2
 // @description  Controla status no SalesSmartly (online/ocupado/indisponível), registra motivos e tempos no painel da Rotação Upseller.
 // @author       Upseller
 // @match        *://*.salesmartly.com/*
@@ -894,11 +894,16 @@
   // ══════════════════════════════════════════════════════════
   // FASE 3 — SINCRONIZAR GRUPOS (painel decide, extensão aplica)
   // ══════════════════════════════════════════════════════════
-  const CHANNEL_0317 = '12';          // channel do número 0317
   const LABEL_GP_SUPORTE = '6606142'; // id da etiqueta "GP Suporte" no SalesSmartly
+  // Canal (número) dos grupos. Vazio = DETECTA SOZINHO pela etiqueta GP Suporte,
+  // então se o número cair/trocar (ex.: 0317 → 11989369104) a distribuição continua
+  // funcionando sem mexer no código. Se um dia precisar travar num canal específico,
+  // coloque aqui o id do canal (ex.: '12').
+  const CANAL_FIXO = '';
 
-  // Lê a lista de grupos do 0317 via API get-chat-list (sem depender do DOM).
-  // Retorna [{ session_id, remark_name, numero }] só dos grupos de GP Suporte no 0317.
+  // Lê os grupos de GP Suporte via API get-chat-list (sem depender do DOM nem de um
+  // número fixo). Retorna [{ session_id, remark_name, numero, channel }] só dos grupos
+  // "Grupo N" da etiqueta GP Suporte, no canal ativo (detectado automaticamente).
   function listarGruposSales() {
     return new Promise((resolve) => {
       const { pid, hya, cpl } = descobrir();
@@ -908,14 +913,32 @@
       const url = 'https://api.salesmartly.com/chat/chat/get-chat-list' +
         '?_xma_=' + pid + '&project_id=' + pid + (hya ? '&_hya_=' + hya : '') + '&_ta_=' + ts;
 
-      // filtro reproduzindo o que o site envia (Grupos + canal 0317)
+      // Filtro: Grupos + etiqueta GP Suporte. NÃO fixa canal → acha em qualquer número.
       const filter = JSON.stringify({
         filter_type: { value: '4', condition: 'contain', labelInValue: [{ value: '4', label: 'Grupos' }] },
-        channel_list: { value: [CHANNEL_0317], condition: 'contain', filterAccounts: { '12': ['90484'] } },
         label_ids: { value: [LABEL_GP_SUPORTE], condition: 'and', labelInValue: [{ id: LABEL_GP_SUPORTE, label_name: 'GP Suporte', value: LABEL_GP_SUPORTE }] }
       });
 
-      const todos = [];
+      const cand = []; // candidatos (com canal) antes de escolher o canal ativo
+
+      function finalizar(parcial) {
+        let grupos = cand;
+        if (CANAL_FIXO) {
+          grupos = cand.filter(g => g.channel === String(CANAL_FIXO));
+          console.log('[Upseller] canal fixo:', CANAL_FIXO, '→', grupos.length, 'grupos');
+        } else {
+          // Detecta o canal ativo: o que tiver MAIS grupos "Grupo N" de GP Suporte.
+          const cont = {};
+          cand.forEach(g => { if (g.channel) cont[g.channel] = (cont[g.channel] || 0) + 1; });
+          const canal = Object.keys(cont).sort((a, b) => cont[b] - cont[a])[0];
+          if (canal) {
+            grupos = cand.filter(g => g.channel === canal);
+            console.log('[Upseller] canal de suporte detectado automaticamente:', canal, '→', grupos.length, 'grupos');
+          }
+        }
+        return { ok: cand.length > 0 || !parcial, grupos, motivo: parcial ? 'erro parcial de rede' : undefined };
+      }
+
       const pedirPagina = (page) => {
         const body = new URLSearchParams();
         body.set('sort_type', '1');
@@ -943,18 +966,16 @@
           if (page === 1 && lista.length) console.log('[Upseller] exemplo de grupo:', JSON.stringify(lista[0]).slice(0, 400));
           if (page === 1 && !lista.length) console.log('[Upseller] resposta crua:', (xhr.responseText||'').slice(0, 500));
           lista.forEach(g => {
-            // só canal 0317 e que tenham apelido "Grupo N"
-            if (String(g.channel) !== CHANNEL_0317) return;
             const remark = g.remark_name || '';
             const m = remark.match(/(\d+)/);
-            if (!m) return; // sem número no apelido → ignora
-            todos.push({ session_id: String(g.id), chat_user_id: String(g.chat_user_id || ''), remark_name: remark, numero: parseInt(m[1], 10) });
+            if (!m) return; // sem número no apelido "Grupo N" → ignora
+            cand.push({ session_id: String(g.id), chat_user_id: String(g.chat_user_id || ''), remark_name: remark, numero: parseInt(m[1], 10), channel: String(g.channel || '') });
           });
           // se veio página cheia, tenta a próxima (até um limite de segurança)
           if (lista.length >= 50 && page < 20) { pedirPagina(page + 1); }
-          else resolve({ ok: true, grupos: todos });
+          else resolve(finalizar(false));
         };
-        xhr.onerror = () => resolve({ ok: todos.length > 0, grupos: todos, motivo: 'erro parcial de rede' });
+        xhr.onerror = () => resolve(finalizar(true));
         xhr.send(body.toString());
       };
       pedirPagina(1);
@@ -1194,5 +1215,5 @@
   }
 
 
-  console.log('[Upseller] Userscript v5.4.1 ativo — alerta AnyDesk com som destravável, bip repetido e notificação do sistema.');
+  console.log('[Upseller] Userscript v5.4.2 ativo — distribuição de grupos sem número fixo (detecta o canal pela etiqueta GP Suporte).');
 })();
